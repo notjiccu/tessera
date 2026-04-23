@@ -1,4 +1,4 @@
-# Tessera v3.0
+# Tessera
 A Rhino 8 Python script that generates a parametric rectangular grid inside any closed planar curve. Useful for layout planning, paneling, fabrication grids, and similar workflows.
 
 ---
@@ -24,7 +24,7 @@ A Rhino 8 Python script that generates a parametric rectangular grid inside any 
 
 ## Running the Script
 
-Download `Tessera_v3_0.py` and save it somewhere permanent on your machine.
+Download `Tessera_v3_1.py` and save it somewhere permanent on your machine.
 
 **Option 1 — RunPythonScript (no setup)**
 
@@ -42,7 +42,7 @@ Run it by typing a short name in the command bar instead of browsing every time:
 2. Click `New`
 3. Fill in:
    - **Name:** `Tessera` (or whatever you prefer)
-   - **Command macro:** `-RunPythonScript "C:\path\to\Tessera_v3_0.py"`
+   - **Command macro:** `-RunPythonScript "C:\path\to\Tessera_v3_1.py"`
 4. Click OK
 
 From now on just type `Tessera` in the command bar and hit Enter.
@@ -52,7 +52,7 @@ From now on just type `Tessera` in the command bar and hit Enter.
 1. Right-click on any toolbar > `New Button`
 2. Paste this into the left mouse button command field:
    ```
-   -RunPythonScript "C:\path\to\Tessera_v3_0.py"
+   -RunPythonScript "C:\path\to\Tessera_v3_1.py"
    ```
 3. Add a label or icon if you want
 4. Click OK
