@@ -93,22 +93,35 @@ def create_grid_from_selected_rectangle():
     gap_x  = load_data("gap_x",  2)
     gap_y  = load_data("gap_y",  2)
 
-    # Compute bounding box in the curve's own plane
-    object_plane = rs.CurvePlane(outer_curve)
-    geom_crv     = rs.coercecurve(outer_curve)
-    bbox         = geom_crv.GetBoundingBox(object_plane)
-    if not bbox or not bbox.IsValid:
-        rs.MessageBox("Cannot compute bounding box.", 0, "Error")
+    # Compute plane from the actual edges of the curve
+    # Get the 4 corners of the rectangle from its segments
+    geom_crv = rs.coercecurve(outer_curve)
+    if not geom_crv:
+        rs.MessageBox("Cannot read curve geometry.", 0, "Error")
         return
 
-    plane = object_plane
+    # Explode into segments to get edge directions
+    segs = geom_crv.DuplicateSegments()
+    if not segs or len(segs) < 2:
+        rs.MessageBox("Curve does not have enough segments.", 0, "Error")
+        return
 
-    pt0 = bbox.Corner(True,  True,  True)
-    pt1 = bbox.Corner(False, True,  True)
-    pt3 = bbox.Corner(True,  False, True)
+    # Use first segment to define X axis, second for Y axis
+    seg0 = segs[0]
+    seg1 = segs[1]
 
-    width  = (pt1 - pt0).Length
-    height = (pt3 - pt0).Length
+    pt0 = seg0.PointAtStart
+    x_axis = seg0.PointAtEnd - pt0
+    width = x_axis.Length
+    x_axis.Unitize()
+
+    y_axis = seg1.PointAtEnd - seg1.PointAtStart
+    height = y_axis.Length
+    y_axis.Unitize()
+
+    # Build a reliable plane from the actual edge directions
+    z_axis = rg.Vector3d.CrossProduct(x_axis, y_axis)
+    plane = rg.Plane(pt0, x_axis, y_axis)
 
     # User inputs
     border = rs.GetReal("Border width (inward, equal on all sides)", border, minimum=0)
@@ -164,9 +177,7 @@ def create_grid_from_selected_rectangle():
 
     created_objs = []
 
-    # Local plane offsets
-    pt0_local_x = plane.ClosestParameter(pt0)[0]
-    pt0_local_y = plane.ClosestParameter(pt0)[1]
+    # pt0 is already the world-space origin of the grid (first corner of first segment)
 
     # Layers
     rect_layer  = ensure_layer("Rectangle",           (0,   0,   0))
@@ -174,21 +185,24 @@ def create_grid_from_selected_rectangle():
     if add_labels:
         label_layer = ensure_layer("Rectangle::Labels", (0,   100, 200), parent="Rectangle")
 
-    # Text height: fit inside cell with some padding (use 30% of the smaller dimension)
-    # We also cap it so long labels (e.g. AA12) don't overflow
-    # Final size is calculated per-label based on character count vs cell width
-    base_text_height = min(cell_w, cell_h) * 0.30
+    # Auto text height: ~0.4% of the smaller cell dimension
+    base_text_height = min(cell_w, cell_h) * 0.004
 
     # Create cells
     for i in range(cols):
         for j in range(rows):
-            lx = pt0_local_x + border + i * (cell_w + gap_x)
-            ly = pt0_local_y + border + j * (cell_h + gap_y)
+            # Local offset from pt0 along plane axes
+            offset_x = border + i * (cell_w + gap_x)
+            offset_y = border + j * (cell_h + gap_y)
 
-            rect = rs.AddRectangle(plane, cell_w, cell_h)
+            # Corner of this cell in world space
+            cell_origin = pt0 + plane.XAxis * offset_x + plane.YAxis * offset_y
+
+            # Build a plane at the cell corner aligned to the boundary plane
+            cell_plane = rg.Plane(cell_origin, plane.XAxis, plane.YAxis)
+
+            rect = rs.AddRectangle(cell_plane, cell_w, cell_h)
             if rect:
-                move_vec = plane.PointAt(lx, ly) - plane.Origin
-                rs.MoveObject(rect, move_vec)
                 rs.ObjectLayer(rect, cell_layer)
                 created_objs.append(rect)
 
@@ -196,26 +210,19 @@ def create_grid_from_selected_rectangle():
             if add_labels:
                 label = col_label(i) + str(j + 1)
 
-                # Scale text height down if label is long so it fits cell width
-                # Approximate: each char is ~0.6x the text height wide
-                char_count = len(label)
-                max_h_from_width  = cell_w / (char_count * 0.65)
-                max_h_from_height = cell_h * 0.50
-                text_height = min(base_text_height, max_h_from_width, max_h_from_height)
+                text_height = base_text_height
 
-                # Center of the cell in local plane coords
-                cx = lx + cell_w / 2.0
-                cy = ly + cell_h / 2.0
-                center_pt = plane.PointAt(cx, cy)
+                # Center of the cell in world space
+                center_pt = cell_origin + plane.XAxis * (cell_w / 2.0) + plane.YAxis * (cell_h / 2.0)
 
-                # Build a horizontal plane at the cell center for the text
+                # Build a plane at the cell center aligned to the boundary plane
                 text_plane = rg.Plane(center_pt, plane.XAxis, plane.YAxis)
 
                 txt = rs.AddText(
                     label,
                     text_plane,
                     text_height,
-                    justification=131072 + 2  # middle-center: 131072=MiddleJustification, 2=CenterJustification
+                    justification=131072 + 2  # middle-center
                 )
                 if txt:
                     rs.ObjectLayer(txt, label_layer)
