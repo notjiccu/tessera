@@ -26,12 +26,17 @@ def ensure_layer(name, color, parent=None):
         else:
             return rs.AddLayer(name, color)
 
-def get_boundary_curve():
-    # Prompt the user to choose between:
-    #   1. Draw a new 3-point rectangle interactively
-    #   2. Select an existing closed curve from the scene
-    # Returns the GUID of the resulting curve, or None on cancel.
+def col_label(index):
+    # Converts 0-based column index to Excel-style label: A, B, ..., Z, AA, AB, ...
+    label = ""
+    index += 1
+    while index > 0:
+        index -= 1
+        label = chr(65 + (index % 26)) + label
+        index //= 26
+    return label
 
+def get_boundary_curve():
     choice = rs.GetString(
         "Boundary input method",
         "ExistingShape",
@@ -42,20 +47,15 @@ def get_boundary_curve():
 
     # --- Option 1: 3-point rectangle ---
     if choice == "Draw3PointRectangle":
-        # Use the built-in Rhino command for the full interactive widget.
         rs.Command("_Rectangle _3Point", False)
-
-        # The command leaves the new object selected - grab it.
         selected = rs.LastCreatedObjects()
         if not selected:
             rs.MessageBox("No rectangle was created.", 0, "Error")
             return None
-
         crv = selected[0]
         if not rs.IsCurveClosed(crv) or not rs.IsCurvePlanar(crv):
             rs.MessageBox("The created shape is not a valid closed planar curve.", 0, "Error")
             return None
-
         return crv
 
     # --- Option 2: pick existing shape ---
@@ -81,7 +81,7 @@ def create_grid_from_selected_rectangle():
             rs.DeleteObjects(old_objs)
         rs.DeleteGroup(group_name)
 
-    # Get outer boundary (two-option picker)
+    # Get outer boundary
     outer_curve = get_boundary_curve()
     if outer_curve is None:
         return
@@ -93,22 +93,35 @@ def create_grid_from_selected_rectangle():
     gap_x  = load_data("gap_x",  2)
     gap_y  = load_data("gap_y",  2)
 
-    # Compute bounding box in the curve's own plane
-    object_plane = rs.CurvePlane(outer_curve)
-    geom_crv     = rs.coercecurve(outer_curve)
-    bbox         = geom_crv.GetBoundingBox(object_plane)
-    if not bbox or not bbox.IsValid:
-        rs.MessageBox("Cannot compute bounding box.", 0, "Error")
+    # Compute plane from the actual edges of the curve
+    # Get the 4 corners of the rectangle from its segments
+    geom_crv = rs.coercecurve(outer_curve)
+    if not geom_crv:
+        rs.MessageBox("Cannot read curve geometry.", 0, "Error")
         return
 
-    plane = object_plane
+    # Explode into segments to get edge directions
+    segs = geom_crv.DuplicateSegments()
+    if not segs or len(segs) < 2:
+        rs.MessageBox("Curve does not have enough segments.", 0, "Error")
+        return
 
-    pt0 = bbox.Corner(True,  True,  True)
-    pt1 = bbox.Corner(False, True,  True)
-    pt3 = bbox.Corner(True,  False, True)
+    # Use first segment to define X axis, second for Y axis
+    seg0 = segs[0]
+    seg1 = segs[1]
 
-    width  = (pt1 - pt0).Length
-    height = (pt3 - pt0).Length
+    pt0 = seg0.PointAtStart
+    x_axis = seg0.PointAtEnd - pt0
+    width = x_axis.Length
+    x_axis.Unitize()
+
+    y_axis = seg1.PointAtEnd - seg1.PointAtStart
+    height = y_axis.Length
+    y_axis.Unitize()
+
+    # Build a reliable plane from the actual edge directions
+    z_axis = rg.Vector3d.CrossProduct(x_axis, y_axis)
+    plane = rg.Plane(pt0, x_axis, y_axis)
 
     # User inputs
     border = rs.GetReal("Border width (inward, equal on all sides)", border, minimum=0)
@@ -131,6 +144,10 @@ def create_grid_from_selected_rectangle():
     gap_y = rs.GetReal("Gap between rows", gap_y, minimum=0)
     if gap_y is None:
         return
+
+    # Ask if user wants cell labels
+    label_answer = rs.GetString("Add cell labels? (Yes/No)", "Yes", ["Yes", "No"])
+    add_labels = label_answer and label_answer.lower() == "yes"
 
     # Save settings
     save_data("border", border)
@@ -160,27 +177,56 @@ def create_grid_from_selected_rectangle():
 
     created_objs = []
 
-    # Correct local-plane offsets (bug fix from v2.5)
-    # pt0 is the bounding-box corner in world space.
-    # Get its local U/V coordinates inside the plane.
-    pt0_local_x = plane.ClosestParameter(pt0)[0]
-    pt0_local_y = plane.ClosestParameter(pt0)[1]
+    # pt0 is already the world-space origin of the grid (first corner of first segment)
 
-    rect_layer = ensure_layer("Rectangle",        (0,   0, 0))
-    cell_layer = ensure_layer("Rectangle::Cells", (255, 0, 0), parent="Rectangle")
+    # Layers
+    rect_layer  = ensure_layer("Rectangle",           (0,   0,   0))
+    cell_layer  = ensure_layer("Rectangle::Cells",    (255, 0,   0), parent="Rectangle")
+    if add_labels:
+        label_layer = ensure_layer("Rectangle::Labels", (0,   100, 200), parent="Rectangle")
+
+    # Auto text height: ~0.4% of the smaller cell dimension
+    base_text_height = min(cell_w, cell_h) * 0.004
 
     # Create cells
     for i in range(cols):
         for j in range(rows):
-            lx = pt0_local_x + border + i * (cell_w + gap_x)
-            ly = pt0_local_y + border + j * (cell_h + gap_y)
+            # Local offset from pt0 along plane axes
+            offset_x = border + i * (cell_w + gap_x)
+            offset_y = border + j * (cell_h + gap_y)
 
-            rect = rs.AddRectangle(plane, cell_w, cell_h)
+            # Corner of this cell in world space
+            cell_origin = pt0 + plane.XAxis * offset_x + plane.YAxis * offset_y
+
+            # Build a plane at the cell corner aligned to the boundary plane
+            cell_plane = rg.Plane(cell_origin, plane.XAxis, plane.YAxis)
+
+            rect = rs.AddRectangle(cell_plane, cell_w, cell_h)
             if rect:
-                move_vec = plane.PointAt(lx, ly) - plane.Origin
-                rs.MoveObject(rect, move_vec)
                 rs.ObjectLayer(rect, cell_layer)
                 created_objs.append(rect)
+
+            # Cell label
+            if add_labels:
+                label = col_label(i) + str(j + 1)
+
+                text_height = base_text_height
+
+                # Center of the cell in world space
+                center_pt = cell_origin + plane.XAxis * (cell_w / 2.0) + plane.YAxis * (cell_h / 2.0)
+
+                # Build a plane at the cell center aligned to the boundary plane
+                text_plane = rg.Plane(center_pt, plane.XAxis, plane.YAxis)
+
+                txt = rs.AddText(
+                    label,
+                    text_plane,
+                    text_height,
+                    justification=131072 + 2  # middle-center
+                )
+                if txt:
+                    rs.ObjectLayer(txt, label_layer)
+                    created_objs.append(txt)
 
     rs.ObjectLayer(outer_curve, rect_layer)
     created_objs.append(outer_curve)
@@ -204,14 +250,16 @@ def create_grid_from_selected_rectangle():
         "Rows:        {}\n"
         "Total cells: {}\n"
         "-----------------------------\n"
-        "Cell size:   {:.3f} x {:.3f} {}"
+        "Cell size:   {:.3f} x {:.3f} {}\n"
+        "Labels:      {}"
     ).format(
         width, height, unit_name,
         border, unit_name,
         cols, rows, total_cells,
-        cell_w, cell_h, unit_name
+        cell_w, cell_h, unit_name,
+        "Yes" if add_labels else "No"
     )
-    rs.MessageBox(msg, 0, "Grid Created")
+    rs.MessageBox(msg, 0, "Tessera")
 
 
 create_grid_from_selected_rectangle()
